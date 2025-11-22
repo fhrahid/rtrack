@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Access Required — Refund Tracker</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+      :root{
+        --bg:#f6f8fa;
+        --card:#ffffff;
+        --border:#e4e8f0;
+        --accent:#0b5fff;
+        --muted:#6b7280;
+      }
+      *{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;}
+      body{margin:0;background:var(--bg);display:flex;align-items:center;justify-content:center;min-height:100vh;color:#111827;padding:16px}
+      .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px;max-width:420px;width:100%;box-shadow:0 6px 18px rgba(15,23,42,0.08);}
+      h1{margin:0 0 12px 0;font-size:22px}
+      p{margin:0 0 20px 0;color:var(--muted);}
+      label{display:block;font-weight:600;margin-bottom:6px}
+      input[type="password"]{width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);font-size:15px}
+      button{width:100%;margin-top:16px;padding:12px;border-radius:10px;border:none;background:var(--accent);color:#fff;font-weight:700;font-size:15px;cursor:pointer}
+      .error{margin-top:12px;padding:10px;border-radius:10px;background:#fee2e2;color:#991b1b;font-weight:600;border:1px solid #fecaca}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Enter Access Password</h1>
+      <p>This site is protected. Please enter the shared password to continue.</p>
+      <form method="post" action="{{ url_for('auth') }}">
+        <input type="hidden" name="next" value="{{ next_url }}" />
+        <label for="password">Password</label>
+        <input id="password" type="password" name="password" autofocus required />
+        <button type="submit">Continue</button>
+      </form>
+      {% if error %}
+        <div class="error">{{ error }}</div>
+      {% endif %}
+    </div>
+  </body>
+</html>
