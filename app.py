@@ -1,4 +1,7 @@
-from flask import Flask, render_template, request, url_for
+import os
+import uuid
+
+from flask import Flask, render_template, request, url_for, redirect, make_response, g
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -16,8 +19,167 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
+app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "change-this-dev-secret")
+
+ACCESS_PASSWORD = os.environ.get("RTRACK_ACCESS_PASSWORD", "3f@Tseu@N@Nshekh")
+ACCESS_COOKIE_NAME = "rtrack_auth_token"
+ACCESS_DURATION = 30 * 24 * 60 * 60  # 30 days
+
+VISITOR_LOG_PASSWORD = os.environ.get("RTRACK_VISITOR_LOG_PASSWORD", "tomaredeikhafalaisi")
+VISITOR_LOG_COOKIE = "visitor_log_token"
+
+
+def _auth_serializer():
+    return URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="rtrack-access")
+
+
+def _log_serializer():
+    return URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="rtrack-log")
+
+
+def _make_auth_token(user_agent: str):
+    issued_at = int(time.time())
+    payload = {
+        "id": str(uuid.uuid4()),
+        "ua": user_agent or "",
+        "issued_at": issued_at,
+    }
+    token = _auth_serializer().dumps(payload)
+    return token, payload
+
+
+def _load_auth_payload(token: str):
+    if not token:
+        return None
+    try:
+        return _auth_serializer().loads(token, max_age=ACCESS_DURATION)
+    except (BadSignature, SignatureExpired):
+        return None
+
+
+def _validate_auth_token(token: str, user_agent: str):
+    data = _load_auth_payload(token)
+    if not data:
+        return None
+    if data.get("ua") != (user_agent or ""):
+        return None
+    return data
+
+
+def _client_ip():
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        return cf_ip.strip()
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or ""
+
+
+def _fetch_ip_metadata(ip: str):
+    if not ip or ip.startswith("127.") or ip == "::1":
+        return {"ip": ip, "isp": "Local", "location": "Local"}
+    try:
+        resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=3)
+        if resp.ok:
+            data = resp.json()
+            location_parts = [data.get("city"), data.get("region"), data.get("country_name")]
+            location = ", ".join(part for part in location_parts if part)
+            return {
+                "ip": ip,
+                "isp": data.get("org") or data.get("asn") or "",
+                "location": location or data.get("country_name") or "",
+            }
+    except Exception as ex:
+        logger.info("IP metadata lookup failed for %s: %s", ip, ex)
+    return {"ip": ip}
+
+
+def _parse_user_agent(user_agent: str):
+    ua = user_agent or ""
+    browser = "Unknown"
+    os_name = "Unknown"
+    if "Edg" in ua:
+        browser = "Edge"
+    elif "Chrome" in ua and "Chromium" not in ua:
+        browser = "Chrome"
+    elif "Firefox" in ua:
+        browser = "Firefox"
+    elif "Safari" in ua and "Chrome" not in ua:
+        browser = "Safari"
+    elif "OPR" in ua or "Opera" in ua:
+        browser = "Opera"
+    if "Windows" in ua:
+        os_name = "Windows"
+    elif "Mac OS X" in ua or "Macintosh" in ua:
+        os_name = "macOS"
+    elif "Android" in ua:
+        os_name = "Android"
+    elif "iPhone" in ua or "iPad" in ua:
+        os_name = "iOS"
+    elif "Linux" in ua:
+        os_name = "Linux"
+    return browser, os_name
+
+
+def _record_visitor_entry(payload: dict):
+    try:
+        ip = _client_ip()
+        meta = _fetch_ip_metadata(ip)
+        browser, os_name = _parse_user_agent(request.headers.get("User-Agent", ""))
+        entry = {
+            "unique_id": payload.get("id"),
+            "issued_at": payload.get("issued_at"),
+            "expires_at": (payload.get("issued_at") or int(time.time())) + ACCESS_DURATION,
+            "ip": meta.get("ip"),
+            "isp": meta.get("isp"),
+            "location": meta.get("location"),
+            "browser": browser,
+            "os": os_name,
+        }
+        visitor_path = DATA_DIR / "Visitor.json"
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        records = []
+        if visitor_path.exists():
+            try:
+                records = json.loads(visitor_path.read_text(encoding="utf-8"))
+            except Exception:
+                records = []
+        records.append(entry)
+        visitor_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as ex:
+        logger.warning("Failed to record visitor info: %s", ex)
+
+
+def _make_log_token():
+    return _log_serializer().dumps({"scope": "visitor_log", "ts": int(time.time())})
+
+
+def _validate_log_token(token: str):
+    if not token:
+        return False
+    try:
+        data = _log_serializer().loads(token, max_age=ACCESS_DURATION)
+        return data.get("scope") == "visitor_log"
+    except (BadSignature, SignatureExpired):
+        return False
+
+
+def _load_visitor_records():
+    visitor_path = DATA_DIR / "Visitor.json"
+    if not visitor_path.exists():
+        return []
+    try:
+        data = json.loads(visitor_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    try:
+        return sorted(data, key=lambda r: r.get("issued_at", 0), reverse=True)
+    except Exception:
+        return data
 
 # Register a Jinja filter to format timestamps for templates
 def timestamp_to_string(ts):
@@ -324,6 +486,33 @@ def fetch_source_if_needed(source_name, url):
       - If no cache -> blocking fetch (first-run) with small timeout and fallback to empty
     """
     csv_path, json_path = cache_paths_for_source(source_name)
+        
+    @app.route("/shittingonface", methods=["GET", "POST"])
+    def visitor_log():
+        authed = _validate_log_token(request.cookies.get(VISITOR_LOG_COOKIE))
+        error = None
+        if request.method == "POST":
+            password = request.form.get("password", "")
+            if password == VISITOR_LOG_PASSWORD:
+                authed = True
+                resp = make_response(redirect(url_for("visitor_log")))
+                resp.set_cookie(
+                    VISITOR_LOG_COOKIE,
+                    _make_log_token(),
+                    max_age=ACCESS_DURATION,
+                    httponly=True,
+                    samesite="Lax",
+                    secure=request.scheme == "https",
+                )
+                return resp
+            error = "Incorrect password"
+        records = _load_visitor_records() if authed else []
+        return render_template(
+            "visitor_log.html",
+            authorized=authed,
+            records=records,
+            error=error,
+        )
     now = time.time()
     if csv_path.exists():
         try:
@@ -474,6 +663,95 @@ def get_cache_mtime(source_name):
     if csv_path.exists():
         return csv_path.stat().st_mtime
     return None
+
+
+# Provide visitor info to templates
+@app.context_processor
+def inject_visitor_context():
+    return {"visitor_info": getattr(g, "visitor_info", None)}
+
+
+# --- authentication ---
+
+
+def _auth_exempt_endpoint():
+    if request.endpoint in {"auth", "static"}:
+        return True
+    if request.path.startswith("/static/"):
+        return True
+    return False
+
+
+@app.before_request
+def enforce_password_gate():
+    if _auth_exempt_endpoint():
+        return
+    token = request.cookies.get(ACCESS_COOKIE_NAME)
+    ua = request.headers.get("User-Agent", "")
+    payload = _validate_auth_token(token, ua)
+    if payload:
+        issued = payload.get("issued_at") or int(time.time())
+        expires_at = issued + ACCESS_DURATION
+        g.visitor_info = {
+            "id": payload.get("id"),
+            "issued_at": issued,
+            "expires_at": expires_at,
+            "expires_at_fmt": datetime.fromtimestamp(expires_at).strftime("%d %b %Y %H:%M"),
+        }
+        return
+    next_url = request.url if request.method == "GET" else url_for("index")
+    return redirect(url_for("auth", next=next_url))
+
+
+@app.route("/auth", methods=["GET", "POST"])
+def auth():
+    next_url = request.values.get("next") or url_for("index")
+    error = None
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if password == ACCESS_PASSWORD:
+            token, payload = _make_auth_token(request.headers.get("User-Agent", ""))
+            _record_visitor_entry(payload)
+            response = make_response(redirect(next_url))
+            response.set_cookie(
+                ACCESS_COOKIE_NAME,
+                token,
+                max_age=ACCESS_DURATION,
+                httponly=True,
+                samesite="Lax",
+                secure=request.scheme == "https",
+            )
+            return response
+        error = "Incorrect password"
+    return render_template("auth.html", error=error, next_url=next_url)
+
+
+@app.route("/shittingonface", methods=["GET", "POST"])
+def visitor_log():
+    authed = _validate_log_token(request.cookies.get(VISITOR_LOG_COOKIE))
+    error = None
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if password == VISITOR_LOG_PASSWORD:
+            authed = True
+            resp = make_response(redirect(url_for("visitor_log")))
+            resp.set_cookie(
+                VISITOR_LOG_COOKIE,
+                _make_log_token(),
+                max_age=ACCESS_DURATION,
+                httponly=True,
+                samesite="Lax",
+                secure=request.scheme == "https",
+            )
+            return resp
+        error = "Incorrect password"
+    records = _load_visitor_records() if authed else []
+    return render_template(
+        "visitor_log.html",
+        authorized=authed,
+        records=records,
+        error=error,
+    )
 
 
 # --- routes ---
