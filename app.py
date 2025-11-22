@@ -486,33 +486,6 @@ def fetch_source_if_needed(source_name, url):
       - If no cache -> blocking fetch (first-run) with small timeout and fallback to empty
     """
     csv_path, json_path = cache_paths_for_source(source_name)
-        
-    @app.route("/shittingonface", methods=["GET", "POST"])
-    def visitor_log():
-        authed = _validate_log_token(request.cookies.get(VISITOR_LOG_COOKIE))
-        error = None
-        if request.method == "POST":
-            password = request.form.get("password", "")
-            if password == VISITOR_LOG_PASSWORD:
-                authed = True
-                resp = make_response(redirect(url_for("visitor_log")))
-                resp.set_cookie(
-                    VISITOR_LOG_COOKIE,
-                    _make_log_token(),
-                    max_age=ACCESS_DURATION,
-                    httponly=True,
-                    samesite="Lax",
-                    secure=request.scheme == "https",
-                )
-                return resp
-            error = "Incorrect password"
-        records = _load_visitor_records() if authed else []
-        return render_template(
-            "visitor_log.html",
-            authorized=authed,
-            records=records,
-            error=error,
-        )
     now = time.time()
     if csv_path.exists():
         try:
