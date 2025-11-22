@@ -123,8 +123,16 @@ def safe_decimal_str(value):
 def normalize_header(raw):
     if raw is None:
         return ""
-    h = raw.strip().lower()
-    return HEADER_MAP.get(h, h.replace(" ", "_"))
+    # Normalize any whitespace (including non-breaking spaces) and lowercase
+    try:
+        h_clean = re.sub(r"\s+", " ", str(raw)).replace("\u00A0", " ").strip().lower()
+    except Exception:
+        h_clean = str(raw).strip().lower()
+    mapped = HEADER_MAP.get(h_clean)
+    if mapped:
+        return mapped
+    # Fallback: replace ordinary spaces with underscores
+    return h_clean.replace(" ", "_")
 
 
 def try_parse_date(s):
